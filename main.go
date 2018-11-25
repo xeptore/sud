@@ -49,33 +49,19 @@ type ConfigFile struct {
 func main() {
 	var args Args
 	parseArgs(&args)
-	if !outputDirectoryExists() {
-		fetchLatestReleaseInfo()
-		exit()
+	if outputDirectoryExists() {
+		if doesVersionFileExists() {
+			versionFileData := getVersionFileData()
+			if isVersionFileValid() {
+				if doesVersionFileContainVersionKey() {
+					if isVersionValueValid() {
+						previousVersionParts := parsePreviousVersionSemver()
+					}
+				}
+			}
+		}
 	}
 
-	if !checkForVersionFile() {
-		fetchLatestReleaseInfo()
-		exit()
-	}
-
-	versionFileData := getVersionFileData()
-	if !isVersionFileValid() {
-		fetchLatestReleaseInfo()
-		exit()
-	}
-
-	if !doesVersionFileContainVersionKey() {
-		fetchLatestReleaseInfo()
-		exit()
-	}
-
-	if !isVersionValueValid() {
-		fetchLatestReleaseInfo()
-		exit()
-	}
-
-	previousVersionParts := parsePreviousVersionSemver()
 	releaseInfo := fetchLatestReleaseInfo()
 	// check for errors
 	latestReleaseVersionParts := parsePreviousVersionSemver()
