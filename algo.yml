@@ -1,0 +1,16 @@
+- 1. set args
+- 2. if output directory does not exists, create it and go to 9
+- 3. search for `.sud` file in --out directory relative to the user's currently working directory
+- 4. if exists, open and read the file. if not go to 9
+- 5. check whether yaml parser returns any error or not, on error go to 9
+- 6. check whether `version` key exists in it, if not go to 9
+- 7. check whether value of `version` key is a semver standard value, if not go to 11
+- 8. store validated previuos version to an array of strings (using strings.Slice)
+- 9. request to fetch swagger latest release
+- 10. if any error occurs in request, exit.
+- 11. if previous version exist, compare latest release version with read version. if newer version does not exists, exit
+- 12. download the file
+- 13. extract zip file
+- 14. create output directory if does not exist and copy necessary files
+- 15. remove remaining file and folders
+- 16. set newly downloaded release version to config file
