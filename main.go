@@ -5,10 +5,6 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
-	"github.com/docopt/docopt-go"
-	copy2 "github.com/otiai10/copy"
-	"gopkg.in/resty.v1"
-	"gopkg.in/yaml.v2"
 	"io"
 	"io/ioutil"
 	"log"
@@ -17,6 +13,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	copy2 "github.com/otiai10/copy"
+	"gopkg.in/yaml.v2"
 )
 
 const SwaggerReleasesUrl = "https://api.github.com/repos/swagger-api/swagger-ui/releases/latest"
@@ -24,13 +23,12 @@ const Usage = `
 Swagger UI Downloader
 
 Usage:
-  sud [--config=<file>] [--out=<dir>] [--spec=<spec_file>]
+  sud [--out=<dir>] [--strict]
 
 Options:
   -h --help  		Show help screen and exits
-  --config=<file>  	File to read previously downloaded package information (relative)
   --out=<dir>  		Directory to store output to (relative) [default: ./]
-  --spec=<file>  	File containing OpenAPI yml/json specification (relative)
+  --strict  		Finish process if any error occurred
 `
 
 type GithubResponse struct {
@@ -40,9 +38,8 @@ type GithubResponse struct {
 }
 
 type Args struct {
-	Out string
-	Spec   string
-	Config string
+	Out    string
+	Strict string
 }
 
 type ConfigFile struct {
@@ -52,6 +49,46 @@ type ConfigFile struct {
 func main() {
 	var args Args
 	parseArgs(&args)
+	if !outputDirectoryExists() {
+		fetchLatestReleaseInfo()
+		exit()
+	}
+
+	if !checkForVersionFile() {
+		fetchLatestReleaseInfo()
+		exit()
+	}
+
+	versionFileData := getVersionFileData()
+	if !isVersionFileValid() {
+		fetchLatestReleaseInfo()
+		exit()
+	}
+
+	if !doesVersionFileContainVersionKey() {
+		fetchLatestReleaseInfo()
+		exit()
+	}
+
+	if !isVersionValueValid() {
+		fetchLatestReleaseInfo()
+		exit()
+	}
+
+	previousVersionParts := parsePreviousVersionSemver()
+	releaseInfo := fetchLatestReleaseInfo()
+	// check for errors
+	latestReleaseVersionParts := parsePreviousVersionSemver()
+
+	if !existsNewerVersion() {
+		exit()
+	}
+
+	downloadTheTarball()
+	extract()
+	copyContentsToOutput()
+	clearRemainings()
+	setLatestVersion()
 
 	// 1. request to get latest swagger-ui release
 	logn("Fetching latest release information...")
@@ -82,7 +119,7 @@ func main() {
 
 	}
 
- 	configVersionParts = [3]string{"0", "0", "0"}
+	configVersionParts = [3]string{"0", "0", "0"}
 	releasedSemverParts := sanitizeSemver(githubRes.TagName)
 
 	if diffSemvers(configVersionParts, releasedSemverParts) != 1 {
@@ -92,7 +129,7 @@ func main() {
 
 	fmt.Println("New version exists.")
 	fmt.Printf("Downloading version %s...\n", githubRes.TagName)
-	downloadedTarFilename := "swagger-ui_"+githubRes.TagName+".tar.gz"
+	downloadedTarFilename := "swagger-ui_" + githubRes.TagName + ".tar.gz"
 	err = downloadTheTarball(downloadedTarFilename, githubRes.TarballUrl)
 	if err != nil {
 		log.Fatalf("Error in downloading latest release: %s\nExitting...", err.Error())
@@ -193,7 +230,6 @@ func logn(message string) {
 func logf(message ...string) {
 	fmt.Printf(message[0], message[1:])
 }
-
 
 func Untar(dst string, r io.Reader) error {
 
