@@ -1,40 +1,38 @@
 package main
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"encoding/json"
 	"fmt"
-	"io"
+	"github.com/docopt/docopt-go"
+	copier "github.com/otiai10/copy"
+	"gopkg.in/resty.v1"
+	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"log"
 	"os"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
-
-	copy2 "github.com/otiai10/copy"
-	"gopkg.in/yaml.v2"
 )
 
-const SwaggerReleasesUrl = "https://api.github.com/repos/swagger-api/swagger-ui/releases/latest"
+const SwaggerReleasesURL = "https://api.github.com/repos/swagger-api/swagger-ui/releases/latest"
 const Usage = `
 Swagger UI Downloader
 
 Usage:
-  sud [--out=<dir>] [--strict]
+  sud [--out=<dir>]
 
 Options:
   -h --help  		Show help screen and exits
   --out=<dir>  		Directory to store output to (relative) [default: ./]
-  --strict  		Finish process if any error occurred
 `
+const TempTarFilename = "temp.tar.gz"
+const TempExtractionDirectory = "extracted"
 
 type GithubResponse struct {
-	Url        string `json:"url"`
+	URL        string `json:"url"`
 	TagName    string `json:"tag_name"`
-	TarballUrl string `json:"tarball_url"`
+	TarballURL string `json:"tarball_url"`
 }
 
 type Args struct {
@@ -42,121 +40,203 @@ type Args struct {
 	Strict string
 }
 
-type ConfigFile struct {
+type VersionFile struct {
 	Version string
 }
 
+func getAbsoluteOutputPath(relativeOutputPath *string) (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
+	return path.Join(dir, *relativeOutputPath), nil
+}
+
+func outputDirectoryExists(outPath *string) bool {
+	_, err := os.Stat(*outPath)
+	return !os.IsNotExist(err)
+}
+
+func doesVersionFileExists(outPath *string) bool {
+	_, err := os.Stat(path.Join(*outPath, ".sud"))
+	return !os.IsNotExist(err)
+}
+
+func getVersionFileData(filePath *string) ([]byte, error) {
+	str := path.Join(*filePath, ".sub")
+	data, err := ioutil.ReadFile(str)
+	if err != nil {
+		return []byte{}, err
+	}
+	return data, nil
+}
+
+func isVersionFileValid(fileData *[]byte) (bool, VersionFile) {
+	var vFile VersionFile
+	err := yaml.Unmarshal(*fileData, &vFile)
+	if err != nil {
+		return false, VersionFile{}
+	}
+	return true, vFile
+}
+
+func doesVersionFileContainVersionKey(vFile *VersionFile) (bool, string) {
+	if len(vFile.Version) > 0 {
+		return true, vFile.Version
+	}
+	return false, ""
+}
+
+func isVersionValueValid(version *string) bool {
+	parts := strings.Split(*version, ".")
+	for _, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func splitSemver(version *string) *[]string {
+	splitted := strings.Split(*version, ".")
+	return &splitted
+}
+
+func fetchLatestReleaseInfo(url string, response *GithubResponse) error {
+	res, err := resty.R().Get(url)
+	if err != nil {
+		return err
+	}
+	err = json.Unmarshal([]byte(res.String()), response)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func existsNewerVersion(previous, current *[]string) bool {
+	for i := range *current {
+		if (*current)[i] > (*previous)[i] {
+			return true
+		}
+	}
+	return false
+}
+
+func downloadTheTarball(url *string) error {
+	r := resty.New()
+	r.SetMode("http")
+	res, err := r.NewRequest().Get(*url)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(TempTarFilename, res.Body(), 0644)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func extract(outPath *string) error {
+	file, err := os.Open(TempTarFilename)
+	if err != nil {
+		return err
+	}
+	err = untar(path.Join(*outPath, TempExtractionDirectory), file)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func copyContentsToOutput(outPath *string) error {
+	subdirs, _ := ioutil.ReadDir("./"+ TempExtractionDirectory +"/")
+
+	err := copier.Copy("./" + TempExtractionDirectory + "/" + subdirs[0].Name() + "/dist", *outPath)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func clearRemaining() error {
+	err := os.RemoveAll("./" + TempExtractionDirectory + "")
+	err = os.Remove(TempTarFilename)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func setLatestVersion(outPath, version *string) error {
+	versionFileData := VersionFile{Version: *version}
+	out, err := yaml.Marshal(versionFileData)
+	if err != nil {
+		return err
+	}
+	err = ioutil.WriteFile(path.Join(*outPath, ".sud"), out, 0644)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func createOutputDirectory(outPath *string) error {
+	err := os.MkdirAll(*outPath, 0755)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func main() {
-	var args Args
-	parseArgs(&args)
-	if outputDirectoryExists() {
-		if doesVersionFileExists() {
-			versionFileData := getVersionFileData()
-			if isVersionFileValid() {
-				if doesVersionFileContainVersionKey() {
-					if isVersionValueValid() {
-						previousVersionParts := parsePreviousVersionSemver()
+	previousVersionParts := []string{"0", "0", "0"}
+	var arg Args
+	parseArgs(&arg)
+	outputPath, err := getAbsoluteOutputPath(&arg.Out)
+	
+	if outputDirectoryExists(&outputPath) {
+		if doesVersionFileExists(&outputPath) {
+			versionFileData, err := getVersionFileData(&outputPath)
+			if err != nil {
+				fmt.Println("Error reading version file data")
+			}
+
+			if ok, vFile := isVersionFileValid(&versionFileData); ok {
+				if ok, version := doesVersionFileContainVersionKey(&vFile); ok {
+					sanitizeVersion(&version)
+					if isVersionValueValid(&version) {
+						previousVersionParts = *splitSemver(&version)
 					}
 				}
 			}
 		}
+	} else {
+		err = createOutputDirectory(&outputPath)
 	}
 
-	releaseInfo := fetchLatestReleaseInfo()
+	var response GithubResponse
+	err = fetchLatestReleaseInfo(SwaggerReleasesURL, &response)
+	sanitizeVersion(&response.TagName)
 	// check for errors
-	latestReleaseVersionParts := parsePreviousVersionSemver()
+	latestReleaseVersionParts := splitSemver(&response.TagName)
 
-	if !existsNewerVersion() {
-		exit()
-	}
-
-	downloadTheTarball()
-	extract()
-	copyContentsToOutput()
-	clearRemainings()
-	setLatestVersion()
-
-	// 1. request to get latest swagger-ui release
-	logn("Fetching latest release information...")
-	res, err := resty.R().Get(SwaggerReleasesUrl)
-	if err != nil {
-		log.Fatalf("Error has occurred in fetching Swagger-ui latest release details:\n%s\n.Exitting...\n", err.Error())
-	}
-
-	var githubRes GithubResponse
-	if err := json.Unmarshal([]byte(res.String()), &githubRes); err != nil {
-		log.Fatalf("Error has occurred in parsing response.\nExitting...\n")
-	}
-
-	currPath, _ := os.Executable()
-	currDir := filepath.Dir(currPath)
-	data, err := ioutil.ReadFile(path.Join(currDir, args.Config))
-	var configVersionParts [3]string
-	if err == nil && len(string(data)) > 0 {
-		var yml ConfigFile
-		err = yaml.Unmarshal(data, &yml)
-		if err == nil {
-			if isValidSemver := parseSemver(yml.Version, configVersionParts); !isValidSemver {
-				fmt.Printf("Failed to parse config file version. Skipping...")
-			}
-		} else {
-			fmt.Printf("Failed to parse config file '%s'. Skipping...", args.Config)
-		}
-
-	}
-
-	configVersionParts = [3]string{"0", "0", "0"}
-	releasedSemverParts := sanitizeSemver(githubRes.TagName)
-
-	if diffSemvers(configVersionParts, releasedSemverParts) != 1 {
-		fmt.Printf("No update available.\nExtting...")
+	if !existsNewerVersion(&previousVersionParts, latestReleaseVersionParts) {
 		os.Exit(0)
 	}
 
-	fmt.Println("New version exists.")
-	fmt.Printf("Downloading version %s...\n", githubRes.TagName)
-	downloadedTarFilename := "swagger-ui_" + githubRes.TagName + ".tar.gz"
-	err = downloadTheTarball(downloadedTarFilename, githubRes.TarballUrl)
+	err = downloadTheTarball(&response.TarballURL)
+	err = extract(&outputPath)
+	err = copyContentsToOutput(&outputPath)
+	err = clearRemaining()
+	err = setLatestVersion(&outputPath, &response.TagName)
+
 	if err != nil {
-		log.Fatalf("Error in downloading latest release: %s\nExitting...", err.Error())
-		os.Exit(1)
+		fmt.Println("Error:", err.Error())
 	}
-	fmt.Println("Download successful.")
-	fmt.Println("Extracting downloaded zip file...")
-	gzReader, _ := os.Open(downloadedTarFilename)
-	err = Untar("./extracted", gzReader)
-	if err != nil {
-		log.Fatalf("Error in extracting tar file: %s\nExitting...", err.Error())
-		os.Exit(1)
-	}
-
-	fmt.Println("Extracted successfully.")
-	fmt.Printf("Copying files to %s\n", args.Out)
-
-	subdirs, _ := ioutil.ReadDir("./extracted/")
-
-	err = copy2.Copy("./extracted/"+subdirs[0].Name()+"/dist", path.Join(currDir, args.Out))
-	if err != nil {
-		log.Fatalf("Error in copying files: %s\nExitting...", err.Error())
-	}
-
-	os.RemoveAll("./extracted")
-	os.Remove(downloadedTarFilename)
-}
-
-func downloadTheTarball(filename, url string) error {
-	r := resty.New()
-	r.SetMode("http")
-	response, err := r.NewRequest().Get(url)
-	if err != nil {
-		return err
-	}
-
-	er := ioutil.WriteFile(filename, response.Body(), 0644)
-	if er != nil {
-		return err
-	}
-	return nil
 }
 
 func parseArgs(args *Args) {
@@ -166,118 +246,16 @@ func parseArgs(args *Args) {
 		log.Fatalf("Error occurred in parsing arguments: %v\n", err)
 	}
 
-	args.Config, _ = arguments.String("--config")
 	args.Out, _ = arguments.String("--out")
 	if len(args.Out) == 0 {
 		args.Out = "./"
 	}
-	args.Spec, _ = arguments.String("--spec")
 }
 
-func diffSemvers(x, y [3]string) int {
-	for i := range x {
-		if x[i] > y[i] {
-			return 1
-		} else if x[i] < y[i] {
-			return -1
-		}
-	}
-	return 0
-}
-
-func sanitizeSemver(v string) [3]string {
-	if strings.Index(v, "v") == 0 {
-		v = v[1:]
-	}
-	var parts [3]string
-	ok := parseSemver(v, parts)
-	if !ok {
-		log.Fatalf("Error in parsing Swagger UI latest release version '%s'", v)
-		os.Exit(1)
-	}
-	return parts
-}
-
-func parseSemver(version string, parts [3]string) bool {
-	p := strings.Split(version, ".")
-	for _, part := range p {
-		v, err := strconv.Atoi(part)
-		if err != nil || v < 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func logn(message string) {
-	fmt.Println(message)
-}
-
-func logf(message ...string) {
-	fmt.Printf(message[0], message[1:])
-}
-
-func Untar(dst string, r io.Reader) error {
-
-	gzr, err := gzip.NewReader(r)
-	if err != nil {
-		return err
-	}
-	defer gzr.Close()
-
-	tr := tar.NewReader(gzr)
-
-	for {
-		header, err := tr.Next()
-
-		switch {
-
-		// if no more files are found return
-		case err == io.EOF:
-			return nil
-
-		// return any other error
-		case err != nil:
-			return err
-
-		// if the header is nil, just skip it (not sure how this happens)
-		case header == nil:
-			continue
-		}
-
-		// the target location where the dir/file should be created
-		target := filepath.Join(dst, header.Name)
-
-		// the following switch could also be done using fi.Mode(), not sure if there
-		// a benefit of using one vs. the other.
-		// fi := header.FileInfo()
-
-		// check the file type
-		switch header.Typeflag {
-
-		// if its a dir and it doesn't exist create it
-		case tar.TypeDir:
-			if _, err := os.Stat(target); err != nil {
-				if err := os.MkdirAll(target, 0755); err != nil {
-					return err
-				}
-			}
-
-		// if it's a file create it
-		case tar.TypeReg:
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
-			if err != nil {
-				return err
-			}
-
-			// copy over contents
-			if _, err := io.Copy(f, tr); err != nil {
-				return err
-			}
-
-			// manually close here after each file operation; defering would cause each file close
-			// to wait until all operations have completed.
-			f.Close()
-		}
+func sanitizeVersion(v *string) {
+	tempV := *v
+	if strings.Index(*v, "v") == 0 {
+		*v = tempV[1:]
 	}
 }
+
