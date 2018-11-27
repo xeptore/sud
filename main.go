@@ -16,6 +16,7 @@ import (
 )
 
 const SwaggerReleasesURL = "https://api.github.com/repos/swagger-api/swagger-ui/releases/latest"
+const SavingFileName = ".sud"
 const Usage = `
 Swagger UI Downloader
 
@@ -24,7 +25,7 @@ Usage:
 
 Options:
   -h --help  		Show help screen and exits
-  --out=<dir>  		Directory to store output to (relative) [default: ./]
+  --out=<dir>  		Directory to store output to (relative) [default: .]
 `
 const TempTarFilename = "temp.tar.gz"
 const TempExtractionDirectory = "extracted"
@@ -59,12 +60,12 @@ func outputDirectoryExists(outPath *string) bool {
 }
 
 func doesVersionFileExists(outPath *string) bool {
-	_, err := os.Stat(path.Join(*outPath, ".sud"))
+	_, err := os.Stat(path.Join(*outPath, SavingFileName))
 	return !os.IsNotExist(err)
 }
 
 func getVersionFileData(filePath *string) ([]byte, error) {
-	str := path.Join(*filePath, ".sub")
+	str := path.Join(*filePath, SavingFileName)
 	data, err := ioutil.ReadFile(str)
 	if err != nil {
 		return []byte{}, err
@@ -140,22 +141,22 @@ func downloadTheTarball(url *string) error {
 	return nil
 }
 
-func extract(outPath *string) error {
+func extract() error {
 	file, err := os.Open(TempTarFilename)
 	if err != nil {
 		return err
 	}
-	err = untar(path.Join(*outPath, TempExtractionDirectory), file)
+	err = untar(path.Join(".", TempExtractionDirectory), file)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func copyContentsToOutput(outPath *string) error {
-	subdirs, _ := ioutil.ReadDir("./"+ TempExtractionDirectory +"/")
+func copyContentsToOutput(src string, outPath *string) error {
+	subdirs, _ := ioutil.ReadDir(src + "/")
 
-	err := copier.Copy("./" + TempExtractionDirectory + "/" + subdirs[0].Name() + "/dist", *outPath)
+	err := copier.Copy(path.Join(src, subdirs[0].Name(), "/dist"), *outPath)
 	if err != nil {
 		return err
 	}
@@ -177,7 +178,7 @@ func setLatestVersion(outPath, version *string) error {
 	if err != nil {
 		return err
 	}
-	err = ioutil.WriteFile(path.Join(*outPath, ".sud"), out, 0644)
+	err = ioutil.WriteFile(path.Join(*outPath, SavingFileName), out, 0644)
 	if err != nil {
 		return err
 	}
@@ -197,53 +198,106 @@ func main() {
 	var arg Args
 	parseArgs(&arg)
 	outputPath, err := getAbsoluteOutputPath(&arg.Out)
-	
-	if outputDirectoryExists(&outputPath) {
-		if doesVersionFileExists(&outputPath) {
-			versionFileData, err := getVersionFileData(&outputPath)
-			if err != nil {
-				fmt.Println("Error reading version file data")
-			}
+	warn(fmt.Sprintf("specified output directory: (%s)", outputPath))
 
-			if ok, vFile := isVersionFileValid(&versionFileData); ok {
-				if ok, version := doesVersionFileContainVersionKey(&vFile); ok {
-					sanitizeVersion(&version)
-					if isVersionValueValid(&version) {
-						previousVersionParts = *splitSemver(&version)
+	if outputDirectoryExists(&outputPath) {
+		warn("output directory exists. no need to create it.")
+		if doesVersionFileExists(&outputPath) {
+			warn("version file found in output directory.")
+			warn("reading version file...")
+			versionFileData, err := getVersionFileData(&outputPath)
+			if err == nil {
+				warn("reading version file successful.")
+				warn("validating version file...")
+				if ok, vFile := isVersionFileValid(&versionFileData); ok {
+					if ok, version := doesVersionFileContainVersionKey(&vFile); ok {
+						sanitizeVersion(&version)
+						if isVersionValueValid(&version) {
+							warn("validating version file successful.")
+							warn(fmt.Sprintf("previously downloaded version found %s.", version))
+							previousVersionParts = *splitSemver(&version)
+						} else {
+							warn("version file does not have a valid 'version' value.")
+						}
+					} else {
+						warn("version file does not contain 'version' key.")
 					}
+				} else {
+					warn("invalid version file.")
 				}
+			} else {
+				warn("unable to read version file data.")
 			}
+		} else {
+			warn("version file does not exist.")
 		}
 	} else {
+		warn("output directory does not exist.")
+		warn("creating output directory...")
 		err = createOutputDirectory(&outputPath)
+		if err != nil {
+			logErrorFatal("unable to create output directory.")
+		}
+		warn("output directory created.")
 	}
 
 	var response GithubResponse
+	warn("fetching Swagger UI latest release information...")
+	warn(SwaggerReleasesURL)
 	err = fetchLatestReleaseInfo(SwaggerReleasesURL, &response)
+	if err != nil {
+		logErrorFatal("failed to fetch latest Swagger UI release information.")
+	}
+	warn("fetching latest release information successful.")
+
 	sanitizeVersion(&response.TagName)
-	// check for errors
 	latestReleaseVersionParts := splitSemver(&response.TagName)
 
 	if !existsNewerVersion(&previousVersionParts, latestReleaseVersionParts) {
+		warn("no new version found.")
+		warn("Exiting...")
 		os.Exit(0)
 	}
+	warn(fmt.Sprintf("new version %s found.", response.TagName))
 
+	warn("downloading latest release...")
 	err = downloadTheTarball(&response.TarballURL)
-	err = extract(&outputPath)
-	err = copyContentsToOutput(&outputPath)
-	err = clearRemaining()
-	err = setLatestVersion(&outputPath, &response.TagName)
-
 	if err != nil {
-		fmt.Println("Error:", err.Error())
+		logErrorFatal("error downloading latest release.")
 	}
+	warn("downloading latest release successful.")
+	warn(fmt.Sprintf("extracting downloaded tar file to %s...", outputPath))
+	err = extract()
+	if err != nil {
+		logErrorFatal("error extracting tar file.")
+	}
+	warn("extracting downloaded tar file successful.")
+	warn(fmt.Sprintf("copying necessary files to %s...", outputPath))
+	err = copyContentsToOutput(path.Join(".", TempExtractionDirectory), &outputPath)
+	if err != nil {
+		logErrorFatal("error copying files.")
+	}
+	warn("copying necessary files successful.")
+	warn("cleaning things up...")
+	err = clearRemaining()
+	if err != nil {
+		logErrorFatal("error removing unnecessary files.")
+	}
+	warn("cleaning things up successful.")
+	warn(fmt.Sprintf("saving latest version to %s...", path.Join(outputPath, SavingFileName)))
+	err = setLatestVersion(&outputPath, &response.TagName)
+	if err != nil {
+		logErrorFatal("error saving latest release version.")
+	}
+	warn("latest version saved successfully.")
+	goodLuck("Have a nice day :)")
 }
 
 func parseArgs(args *Args) {
 	arguments, err := docopt.ParseDoc(Usage)
 
 	if err != nil {
-		log.Fatalf("Error occurred in parsing arguments: %v\n", err)
+		log.Fatalf("error occurred in parsing arguments: %v\n", err)
 	}
 
 	args.Out, _ = arguments.String("--out")
@@ -258,4 +312,3 @@ func sanitizeVersion(v *string) {
 		*v = tempV[1:]
 	}
 }
-
