@@ -3,16 +3,17 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/docopt/docopt-go"
-	copier "github.com/otiai10/copy"
-	"gopkg.in/resty.v1"
-	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"log"
 	"os"
 	"path"
 	"strconv"
 	"strings"
+
+	"github.com/docopt/docopt-go"
+	copier "github.com/otiai10/copy"
+	"gopkg.in/resty.v1"
+	"gopkg.in/yaml.v2"
 )
 
 const SwaggerReleasesURL = "https://api.github.com/repos/swagger-api/swagger-ui/releases/latest"
